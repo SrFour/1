@@ -1,0 +1,376 @@
+================================================================================
+DOCUMENTACION DEL PROYECTO - "IronCore Fitness" (Entregable 7)
+Sistema de gestion de membresias y control de acceso para gimnasio
+================================================================================
+
+
+
+--------------------------------------------------------------------------------
+1. VISION GENERAL
+--------------------------------------------------------------------------------
+
+La aplicacion es un sistema de escritorio (Java Swing) para administrar un
+gimnasio. Permite:
+
+  * Registrar afiliados con distintos tipos de membresia (Basica, Premium, VIP).
+  * Registrar invitados llevados por un afiliado, con cupo mensual de visitas
+    gratuitas y cobro de pase diario al superarlo.
+  * Controlar el ingreso diario (afiliado o invitado) con reglas de acceso.
+  * Gestionar referidos: descuento para quien refiere y para el nuevo afiliado,
+    contador de referidos exitosos y beneficio de "mes gratis" a partir de 3.
+  * Renovar, suspender y reactivar membresias.
+  * Emitir facturas (afiliacion, renovacion y visita de invitado) y generarlas
+    en PDF sin librerias externas.
+  * Convertir un invitado en afiliado conservando su historial de visitas y el
+    codigo de quien lo invito originalmente.
+  * Configurar precios, costos y porcentajes de descuento desde la interfaz.
+  * Persistir todo el estado en disco (serializacion .dat + resumen .csv).
+
+Organizacion logica por paquetes (declarada en el codigo fuente):
+
+  aplicaciongimnasio           -> AplicacionGimnasio (punto de entrada main)
+  aplicaciongimnasio.modelo    -> Persona, Afiliado, Invitado, Membresia,
+                                  Basica, Premium, VIP, Factura,
+                                  RegistroVisita, RegistroReferido,
+                                  ParametrosMembresia
+  aplicaciongimnasio.servicio  -> Gimnasio, Almacenamiento
+  aplicaciongimnasio.util      -> GeneradorPDF
+  aplicaciongimnasio.gui       -> VentanaPrincipal
+
+--------------------------------------------------------------------------------
+2. QUE HACE CADA CLASE
+--------------------------------------------------------------------------------
+
+[1] AplicacionGimnasio  (paquete aplicaciongimnasio)
+    Punto de entrada de la aplicacion.
+    - main(): intenta cargar el estado guardado con Almacenamiento.cargar(); si
+      no existe o hay error, crea un Gimnasio nuevo ("IronCore Fitness",
+      "Calle Principal 123", tarifa de pase diario 15000).
+    - Usa SwingUtilities.invokeLater() para crear y mostrar la ventana en el
+      hilo de eventos de Swing (buena practica en interfaces graficas).
+
+[2] Persona  (modelo) - CLASE ABSTRACTA
+    Modela los datos comunes de afiliados e invitados: id, documento, nombre,
+    telefono, correo, fechaNacimiento y fotografia (ruta).
+    - Atributos protected para que las subclases puedan acceder, con getters y
+      setters publicos (encapsulamiento).
+    - Define el metodo abstracto mostrarInformacion(): obliga a cada subclase
+      a presentar sus datos a su manera.
+    - toString() devuelve "nombre (documento)".
+    - Implementa Serializable para poder guardarse en disco.
+    - Tiene constructor vacio (necesario para la deserializacion) y constructor
+      parametrizado (sobrecarga de constructores).
+
+[3] Afiliado  (modelo) - extends Persona
+    Representa a un miembro del gimnasio.
+    - Anade codigoAfiliado, conteoReferidosExitosos, membresia, codigoReferidor,
+      lista de invitados y lista de visitas.
+    - REFERIDOS_PARA_BENEFICIO = 3 (constante publica static final).
+    - Devuelve vistas de solo lectura (Collections.unmodifiableList) de sus
+      listas: nadie de fuera puede modificarlas directamente.
+    - agregarInvitado() evita duplicados; agregarVisita() ignora valores null.
+    - mostrarInformacion(): implementacion propia del metodo abstracto.
+    - incrementarReferidos(), tieneBeneficioPorReferidos().
+    - validarAcceso(): devuelve un mensaje segun falte membresia, este vencida/
+      suspendida, o este activa. puedeIngresar() es la version booleana.
+    - El setter del contador usa Math.max(0, ...) para evitar negativos.
+
+[4] Invitado  (modelo) - extends Persona
+    Persona que visita el gimnasio invitada por un afiliado.
+    - Anade codigoInvitado, cupoGratisMensual, visitasConsumidasMes,
+      codigoAfiliadoInvitador, mesControl (YearMonth actual), historial de
+      visitas y el flag convertidoAAfiliado.
+    - verificarCambioDeMes(): si cambio el mes, reinicia visitasConsumidasMes
+      sin borrar el historial (el cupo se renueva cada mes).
+    - tieneCupoGratis() y consumirVisitaGratis() controlan el beneficio.
+    - validarAcceso(): autoriza visita gratuita o autoriza con cobro de pase
+      diario cuando se agoto el cupo.
+    - Si se convierte en afiliado, se conservan el invitador y las visitas.
+
+[5] Membresia  (modelo) - CLASE ABSTRACTA
+    Contrato comun de todos los planes.
+    - Constantes de estado: "Activa", "Vencida", "Suspendida".
+    - Atributos: tipo, duracion, precioBase, fechaInicio, fechaVencimiento,
+      estado y porcentajeDescuentoAplicable.
+    - Metodos abstractos: calcularCostoMensual() y
+      getPorcentajeDescuentoReferido() -> cada plan decide su regla
+      (polimorfismo).
+    - acumularDescuento(pct): suma descuentos limitandolos al 100%.
+    - calcularMontoRenovacion(): aplica el descuento al costo mensual, nunca
+      negativo y redondeado a 2 decimales.
+    - renovar(): extiende el vencimiento un mes desde la fecha de fin (o desde
+      hoy si ya vencio) y marca el estado como Activa.
+    - suspender(), activar(), estaActiva() (verifica estado y fecha).
+    - round() protegido y estatico para redondeo monetario.
+
+[6] Basica  (modelo) - extends Membresia
+    Plan basico: acceso a maquinas y pesas.
+    - calcularCostoMensual() = precioBase (tarifa plana).
+    - getPorcentajeDescuentoReferido() = 0.0 (sin descuento por referido).
+    - Constructor por defecto fija el tipo "Basica".
+
+[7] Premium  (modelo) - extends Membresia
+    Incluye clases grupales (spinning, zumba, funcional).
+    - Anade costoClasesIncluidas.
+    - calcularCostoMensual() = precioBase + costoClasesIncluidas.
+    - getPorcentajeDescuentoReferido() = 5.0.
+
+[8] VIP  (modelo) - extends Membresia
+    Incluye clases, nutricionista y entrenador personal.
+    - Anade costoEntrenadorPorSesion, costoClasesIncluidas,
+      sesionesEntrenadorMes (4 por defecto) y costoNutricionista.
+    - calcularCostoMensual() = precioBase + clases + (costo entrenador *
+      sesiones) + nutricionista.
+    - getPorcentajeDescuentoReferido() = 10.0.
+    - Setters con Math.max(0, ...) para impedir valores invalidos.
+
+[9] ParametrosMembresia  (modelo)
+    Configuracion administrativa por tipo de plan: precioBase, costoClases,
+    costoEntrenadorSesion y porcentajeDescuentoReferido.
+    - Centraliza valores que antes estaban dispersos en el codigo.
+    - crearMembresia() es un FACTORY METHOD: segun el campo tipo devuelve una
+      instancia concreta de Basica, Premium o VIP con fechas "hoy" y "hoy + 1
+      mes", estado Activa y el descuento configurado.
+
+[10] RegistroVisita  (modelo)
+    Guarda cada ingreso: id, fecha, hora, esGratis, costoCobrado, codigoPersona,
+    tipoPersona y resultadoAcceso.
+    - calcularCosto(Invitado, tarifaBase): si el invitado tiene cupo gratis,
+      marca gratuidad y costo 0; si no, cobra la tarifa del pase.
+    - Factory estatico ahora(): crea el registro con fecha/hora actuales.
+    - toString() resume el registro.
+
+[11] RegistroReferido  (modelo)
+    Guarda la relacion entre referidor y nuevo afiliado: fecha, si fue exitoso,
+    codigos, porcentaje y montos de descuento para ambos.
+    - marcarExitoso() pone la fecha actual si estaba vacia.
+
+[12] Factura  (modelo)
+    Datos de una factura: numero, fecha, datos del gimnasio (NIT fijo
+    900.123.456-7), cliente, documento, tipo de pago, detalle, subtotal,
+    descuento, total y notas.
+    - enum interno TipoPago { AFILIACION, RENOVACION, VISITA_INVITADO }.
+    - El constructor acota subtotal/descuento a valores validos y calcula el
+      total redondeado.
+    - getTitulo() devuelve el encabezado segun el enum (switch).
+    - getNotas() devuelve vista de solo lectura; agregarNota() ignora vacias.
+
+[13] Gimnasio  (servicio) - AGREGADO / LOGICA DE NEGOCIO
+    Clase central que concentra las operaciones y las colecciones: mapas de
+    afiliados e invitados (por codigo) y listas de visitas, referidos, facturas
+    y parametros, ademas de un consecutivo para generar codigos.
+    - configurarValoresPorDefecto(): Basica 80000/0%, Premium 120000 + 25000
+      clases/5%, VIP 180000 + 25000 clases + 35000 entrenador/10%.
+    - Getters que devuelven colecciones NO modificables (defensa del estado).
+    - reigstrarPersona() (nombre original conservado, con tipografia) usa
+      instanceof para decidir donde guardar; registrarAfiliado() y
+      registrarInvitado() delegan en el.
+    - registrarAfiliadoConReferido(): crea la membresia desde parametros,
+      aplica descuento al nuevo y al referidor, incrementa el contador, guarda
+      el RegistroReferido y, al llegar a 3 referidos, genera factura de "mes
+      gratis" con descuento del 100%. Devuelve la factura de afiliacion.
+    - registrarIngreso(): valida acceso, consume cupo de invitado o genera
+      factura de pase diario si supero el cupo; siempre guarda la visita.
+    - renovarMembresia(), suspenderMembresia(), convertirInvitadoEnAfiliado()
+      (copia el historial y marca al invitado como convertido).
+    - rankingReferidos() ordena con Comparator por conteo descendente.
+    - actualizarParametros() permite cambiar precios/descuentos.
+    - restore() reconstruye el objeto despues de cargar desde archivo.
+
+[14] Almacenamiento  (servicio) - CLASE FINAL / UTILITARIA
+    Persistencia en archivos.
+    - guardar(Gimnasio): crea carpeta "datos", serializa nombre, direccion,
+      tarifa, consecutivo y todas las colecciones en "datos/gimnasio.dat", y
+      exporta ademas un resumen legible en "datos/resumen.csv".
+    - cargar(): lee el .dat, reconstruye el Gimnasio con restore() y devuelve
+      null si no existe el archivo.
+    - exportarCsv() y csv() escapan ; " y saltos de linea.
+    - Constructor privado: no se permite instanciar la clase (solo metodos
+      estaticos).
+
+[15] GeneradorPDF  (util) - CLASE FINAL / UTILITARIA
+    Construye un PDF 1.4 basico "a mano", sin dependencias externas.
+    - generarFactura(Factura): arma las lineas (titulo, gimnasio, cliente,
+      concepto, subtotal, descuento, total, notas) y guarda el archivo en
+      "facturas/<numero>.pdf"; devuelve la ruta.
+    - construirPdf(): escribe los 6 objetos PDF (Catalog, Pages, Page,
+      Contents, Font Helvetica), la tabla xref y el trailer. Usa ISO-8859-1 /
+      WinAnsiEncoding para tildes y enye.
+    - Constructor privado, igual que Almacenamiento.
+
+[16] VentanaPrincipal  (gui) - extends JFrame
+    Interfaz Swing con JTabbedPane de 5 pestañas y barra de menu Archivo.
+    - Pestaña "Afiliados": formulario (nombre, documento, correo, foto, tipo,
+      codigo de referido), botones Registrar y Convertir invitado, tabla con
+      membresia, referidos y estado de acceso.
+    - Pestaña "Invitados": formulario con afiliado invitador y cupo (JSpinner),
+      tabla de invitados.
+    - Pestaña "Ingreso diario": busca por codigo o documento, elige tipo de
+      persona y muestra el resultado de validarAcceso().
+    - Pestaña "Membresias y facturas": renovar (genera PDF), suspender, generar
+      PDF de una factura seleccionada, tablas de facturas y ranking.
+    - Pestaña "Administracion": tarifa de pase, precios/costos/descuentos por
+      tipo, boton de aplicar y guardar, y consulta de ranking.
+    - refrescarTodo(): reconstruye los DefaultTableModel con los datos actuales.
+    - guardarDatos() llama a Almacenamiento.guardar(); error() muestra el
+      mensaje en la barra de estado y en un JOptionPane.
+    - Usa expresiones lambda en los ActionListener.
+
+--------------------------------------------------------------------------------
+3. FUNDAMENTOS DE POO APLICADOS (con enfoque Java)
+--------------------------------------------------------------------------------
+
+* ABSTRACCION
+  - Persona y Membresia son abstractas: modelan conceptos generales y no se
+    instancian. Declaran que deben hacer sus subclases sin imponer como.
+  - El resto de clases ocultan los detalles de implementacion detras de metodos
+    publicos (por ejemplo, GeneradorPDF esconde la estructura interna del PDF).
+
+* ENCAPSULAMIENTO
+  - Atributos privados (o protected en las clases base) + getters/setters.
+  - Validacion en setters: Math.max(0, ...), Math.min(100, ...).
+  - Colecciones devueltas con Collections.unmodifiableList/Collection: el
+    exterior puede leer pero no alterar el estado interno.
+  - Factura calcula su propio total; el codigo de fuera no puede dejarla
+    incoherente.
+
+* HERENCIA
+  - Afiliado extends Persona; Invitado extends Persona.
+  - Basica/Premium/VIP extends Membresia.
+  - VentanaPrincipal extends JFrame (herencia de la API Swing).
+  - Se usa super(...) en los constructores para inicializar la parte base.
+  - serialVersionUID declara versiones de clases serializables.
+
+* POLIMORFISMO
+  - mostrarInformacion() se implementa de forma distinta en Afiliado e
+    Invitado; se podria invocar desde una referencia Persona.
+  - calcularCostoMensual() y getPorcentajeDescuentoReferido() se resuelven en
+    tiempo de ejecucion segun el tipo real de Membresia (Basica=0%,
+    Premium=5%, VIP=10%). Por eso registrarAfiliadoConReferido() puede trabajar
+    con una variable Membresia sin conocer la subclase.
+  - instanceof en reigstrarPersona() decide el tipo concreto a registrar.
+
+* INTERFACES
+  - java.io.Serializable (marcador) en casi todas las clases del modelo y en
+    Gimnasio: permite la serializacion binaria usada por Almacenamiento.
+
+* COMPOSICION Y AGREGACION
+  - Afiliado *-- Invitado y Afiliado *-- RegistroVisita (el afiliado es owner
+    de sus listas).
+  - Gimnasio es la raiz de agregado: contiene afiliados, invitados, visitas,
+    referidos, facturas y parametros.
+  - Afiliado o-- Membresia: relacion de asociacion/agregacion (la membresia se
+    crea desde parametros y puede existir por separado).
+  - ParametrosMembresia ..> Membresia: dependencia de creacion (Factory).
+
+* METODOS Y CONSTRUCTORES
+  - Sobrecarga de constructores en Persona, Afiliado, Membresia, Factura,
+    RegistroVisita, RegistroReferido y las membresias.
+  - Metodos estaticos de fabrica: RegistroVisita.ahora() y
+    ParametrosMembresia.crearMembresia().
+  - Metodos utilitarios estaticos y clases finales con constructor privado:
+    Almacenamiento y GeneradorPDF (patron de clase de utilidades).
+
+* ENUM
+  - Factura.TipoPago con switch en getTitulo(): tipo seguro y legible en lugar
+    de cadenas sueltas.
+
+* COLECCIONES Y API MODERNA
+  - LinkedHashMap para conservar orden de insercion en afiliados/invitados y
+    busqueda O(1) por codigo; ArrayList para historiales.
+  - Stream + lambda para buscar una factura por numero en la GUI.
+  - Comparator.comparingInt(...).reversed() para el ranking.
+  - SwingUtilities.invokeLater() y lambdas en ActionListener (interfaces
+    funcionales).
+
+* MANEJO DE EXCEPCIONES
+  - IllegalArgumentException para datos invalidos o no encontrados; se capturan
+    en la GUI y se muestran al usuario.
+  - DateTimeParseException controlada en Membresia (renovar/estaActiva).
+  - IOException / ClassNotFoundException propagadas a la capa GUI.
+
+* FECHAS JAVA 8+
+  - LocalDate para vencimientos y facturas, YearMonth para el cupo mensual,
+    LocalTime para la hora de ingreso. Se evita la antigua clase Date.
+
+* PRINCIPIOS SOLID / BUENAS PRACTICAS
+  - SRP: modelo, servicio, util y GUI separados por responsabilidad.
+  - OCP: agregar un nuevo tipo de membresia solo requiere una nueva subclase y
+    una entrada en parametros, sin cambiar la logica de facturacion.
+  - DIP involuntario: la logica depende de la abstraccion Membresia, no de
+    Basica/Premium/VIP concretas.
+  - Constantes public static final en lugar de numeros magicos
+    (ESTADO_ACTIVA, REFERIDOS_PARA_BENEFICIO).
+
+--------------------------------------------------------------------------------
+4. FUNCIONAMIENTO DE LA APLICACION (flujo de uso)
+--------------------------------------------------------------------------------
+
+ARRANQUE
+  1. JVM ejecuta AplicacionGimnasio.main().
+  2. crearGimnasio() intenta Almacenamiento.cargar("datos/gimnasio.dat").
+     - Si existe: restaura nombre, direccion, tarifa, consecutivo y colecciones.
+     - Si no: crea IronCore Fitness con valores por defecto.
+  3. SwingUtilities.invokeLater() muestra VentanaPrincipal.
+
+REGISTRO DE AFILIADO CON REFERIDO (pestaña Afiliados)
+  1. El usuario llena nombre, documento, correo, foto, tipo y (opcional)
+     codigo de referidor.
+  2. La GUI crea un Afiliado con codigos AF-xxxx y P-xxxx.
+  3. Gimnasio.registrarAfiliadoConReferido():
+     - busca parametros del tipo y llama crearMembresia() (Factory).
+     - asigna la membresia y registra al afiliado.
+     - si el referidor existe: calcula porcentaje segun su membresia,
+       descuenta al nuevo y al referidor, incrementa referidos y guarda el
+       RegistroReferido.
+     - si el referidor alcanza 3 referidos: crea factura de renovacion con
+       descuento total (mes gratis).
+     - crea la factura de afiliacion (con notas) y la devuelve.
+  4. GeneradorPDF.generarFactura(factura) guarda el PDF en /facturas.
+  5. refrescarTodo() actualiza todas las tablas.
+
+REGISTRO DE INVITADO (pestaña Invitados)
+  - Se indica el codigo del afiliado invitador, datos y cupo mensual (0-10).
+  - Gimnasio.verifica que el invitador exista, crea el invitado (INV-xxxx),
+    lo agrega a la lista del afiliado y al mapa general.
+
+INGRESO DIARIO (pestaña Ingreso diario)
+  - Afiliado: validarAcceso() revisa membresia/estado/vencimiento. Si puede
+    ingresar, se agrega la visita a su historial. Resultado: autorizado/denegado.
+  - Invitado: validarAcceso() + RegistroVisita.calcularCosto().
+    * Con cupo: se consume una visita gratis.
+    * Sin cupo: se genera factura VISITA_INVITADO por el pase diario y se
+      anota el numero de factura en el resultado.
+  - El registro siempre se guarda en el historial global de visitas.
+
+MEMBRESIAS Y FACTURAS
+  - Renovar: calcula subtotal y descuento acumulado, llama m.renovar() (fecha
+    +1 mes y estado Activa), emite factura RENOVACION y su PDF.
+  - Suspender: cambia el estado a Suspendida; el acceso quedara denegado.
+  - "Generar PDF de factura seleccionada" permite reimprimir cualquier factura.
+
+ADMINISTRACION
+  - Permite cambiar tarifa de pase, precios base, costos de clases y
+    entrenador, y descuentos por referido; aplica y guarda en disco.
+  - Consulta de ranking de referidos (ordenado por conteo descendente).
+
+CONVERSION Y PERSISTENCIA
+  - Convertir invitado en afiliado: copia datos personales e historial de
+    visitas, conserva el codigo del invitador como referidor y emite factura.
+  - Guardar datos (menu Archivo o boton de administracion): escribe .dat y
+    .csv en la carpeta "datos". Al salir tambien guarda automaticamente.
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+DIFERENCIA CON GIT HUD
+  	-Almacenamiento
+	-Factura
+	-Generador pdf
+	-Parametrosmembresia
+	-Ventanaprincipal
+
+
+================================================================================
+Fin del documento. Generado por analisis estatico de los 15 archivos Java.
+================================================================================
